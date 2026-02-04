@@ -14,15 +14,15 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy shared library first (for better caching)
-COPY shared-lib /shared-lib
-RUN pip install --no-cache-dir /shared-lib
+COPY wazz-audio-shared /wazz-audio-shared
+RUN pip install --no-cache-dir /wazz-audio-shared
 
 # Copy requirements and install dependencies
-COPY backend/requirements.txt .
+COPY wazz-audio-backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy backend application
-COPY backend/ .
+COPY wazz-audio-backend/ .
 
 # Expose port
 EXPOSE 8000

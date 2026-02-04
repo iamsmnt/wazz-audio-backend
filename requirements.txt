@@ -1,6 +1,6 @@
 # Wazz Audio Backend Requirements
 
-# Note: shared-lib is installed separately in the Dockerfile
+# Note: wazz-audio-shared is installed separately in the Dockerfile
 
 # Web framework
 fastapi==0.104.1
@@ -19,6 +19,8 @@ bcrypt==4.0.1  # Pin to 4.0.1 - has __about__ module required by passlib 1.7.4
 aiosmtplib==2.0.2
 email-validator>=2.0.0
 
+# HTTP client (used by Docker HEALTHCHECK)
+requests>=2.31.0
 
-# Note: Database, storage, and core dependencies are in shared-lib
-# sqlalchemy, pydantic, psycopg2-binary, boto3 are installed via shared-lib
+# Note: Database, storage, and core dependencies are in wazz-audio-shared
+# sqlalchemy, pydantic, psycopg2-binary, boto3 are installed via wazz-audio-shared
