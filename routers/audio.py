@@ -38,47 +38,6 @@ def get_audio_metadata(file_path: str) -> dict:
         return {"sample_rate": None, "channels": None, "duration": None}
 
 
-@router.get("/worker-health")
-async def check_worker_health():
-    """
-    Check if worker service is running and healthy
-
-    This endpoint can be called by the frontend before uploading files
-    to display a warning if workers are unavailable.
-
-    Returns:
-        - status: "healthy" or "unhealthy"
-        - available: bool - Whether workers are available
-        - worker_count: int - Number of active workers
-        - workers: list - List of worker names
-        - queues: list - Available queues
-        - audio_processing_queue_ok: bool - If audio processing queue is ready
-        - message: str - Human-readable status message
-    """
-    try:
-        inspect = celery_app.control.inspect(timeout=2.0)
-        active_workers = inspect.active_queues() or {}
-        worker_count = len(active_workers)
-        queues = []
-        for worker_queues in active_workers.values():
-            queues.extend(q["name"] for q in worker_queues)
-        return {
-            "status": "healthy" if worker_count > 0 else "unhealthy",
-            "available": worker_count > 0,
-            "worker_count": worker_count,
-            "queues": list(set(queues)),
-            "message": f"{worker_count} worker(s) available" if worker_count > 0 else "No workers available",
-        }
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "available": False,
-            "worker_count": 0,
-            "queues": [],
-            "message": f"Could not reach workers: {str(e)}",
-        }
-
-
 @router.post("/upload", response_model=AudioUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_audio(
     file: UploadFile = File(...),
