@@ -14,13 +14,12 @@ from wazz_shared.database import get_db
 from wazz_shared.models import AudioProcessingJob, User
 from wazz_shared.schemas import AudioUploadResponse, AudioJobStatusResponse
 from dependencies import get_optional_current_user
-from celery import Celery
 from wazz_shared.config import get_shared_settings
 from wazz_shared.usage_tracking import track_file_upload, track_file_download
+from celery_init import celery_app
 
 router = APIRouter(prefix="/audio", tags=["audio"])
 settings = get_shared_settings()
-celery_app = Celery(broker=settings.celery_broker_url, backend=settings.celery_result_backend)
 
 
 def get_audio_metadata(file_path: str) -> dict:
@@ -131,7 +130,7 @@ async def upload_audio(
 
     # Queue Celery task for processing
     try:
-        task = celery_app.send_task('tasks.process_audio_task', args=[job.job_id])
+        task = celery_app.send_task('tasks.process_audio_task', args=[job.job_id], queue='audio_processing')
         job.job_metadata = {"celery_task_id": task.id}
         db.commit()
 

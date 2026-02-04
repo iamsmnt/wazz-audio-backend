@@ -1,9 +1,4 @@
 """Authentication routes for signup, login, logout"""
-
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent.parent))
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session

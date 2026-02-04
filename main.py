@@ -8,11 +8,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from wazz_shared.config import get_shared_settings
 from wazz_shared.database import engine, Base
-from celery import Celery
+from celery_init import celery_app
 from routers import auth, guest, audio, usage_stats, admin, user_settings
 
 settings = get_shared_settings()
-celery_app = Celery(broker=settings.celery_broker_url, backend=settings.celery_result_backend)
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
