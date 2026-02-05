@@ -1,9 +1,10 @@
 """Audio processing endpoints"""
 
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException, status, Request
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, status, Request, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from typing import Optional
+from sqlalchemy import desc
+from typing import Optional, List
 from datetime import datetime, timedelta, timezone
 import os
 import uuid
@@ -12,7 +13,7 @@ import mimetypes
 
 from wazz_shared.database import get_db
 from wazz_shared.models import AudioProcessingJob, User
-from wazz_shared.schemas import AudioUploadResponse, AudioJobStatusResponse
+from wazz_shared.schemas import AudioUploadResponse, AudioJobStatusResponse, ProjectResponse, ProjectRenameRequest, MessageResponse
 from dependencies import get_optional_current_user
 from wazz_shared.config import get_shared_settings
 from wazz_shared.usage_tracking import track_file_upload, track_file_download
@@ -40,6 +41,7 @@ def get_audio_metadata(file_path: str) -> dict:
 @router.post("/upload", response_model=AudioUploadResponse, status_code=status.HTTP_201_CREATED)
 async def upload_audio(
     file: UploadFile = File(...),
+    processing_type: Optional[str] = Form(None),
     request: Request = None,
     current_user: Optional[User] = Depends(get_optional_current_user),
     db: Session = Depends(get_db)
@@ -121,6 +123,7 @@ async def upload_audio(
         guest_id=guest_id,
         status="pending",
         progress=0.0,
+        processing_type=processing_type,
         expires_at=expires_at
     )
 
@@ -140,7 +143,7 @@ async def upload_audio(
             user_id=job.user_id,
             guest_id=job.guest_id,
             file_size=float(job.file_size),
-            processing_type="speech_enhancement"
+            processing_type=processing_type or "speech_enhancement"
         )
     except Exception as e:
         # If task queueing fails, mark job as failed
@@ -164,6 +167,106 @@ async def upload_audio(
         expires_at=job.expires_at,
         message="File uploaded successfully. Processing will begin shortly."
     )
+
+
+@router.get("/projects", response_model=List[ProjectResponse])
+async def list_projects(
+    request: Request,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(50, ge=1, le=100),
+    status_filter: Optional[str] = Query(None, alias="status"),
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    List audio processing jobs for the current user or guest.
+
+    Returns projects ordered by most recent first.
+    Supports pagination and optional status filtering.
+    """
+    user_id = current_user.id if current_user else None
+    guest_id = request.headers.get("X-Guest-ID") if not current_user else None
+
+    if not user_id and not guest_id:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    query = db.query(AudioProcessingJob)
+
+    if user_id:
+        query = query.filter(AudioProcessingJob.user_id == user_id)
+    else:
+        query = query.filter(AudioProcessingJob.guest_id == guest_id)
+
+    if status_filter:
+        query = query.filter(AudioProcessingJob.status == status_filter)
+
+    query = query.order_by(desc(AudioProcessingJob.created_at))
+    return query.offset(skip).limit(limit).all()
+
+
+@router.patch("/projects/{job_id}", response_model=ProjectResponse)
+async def rename_project(
+    job_id: str,
+    body: ProjectRenameRequest,
+    request: Request,
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    db: Session = Depends(get_db),
+):
+    """Rename a project. User/guest must own the job."""
+    job = db.query(AudioProcessingJob).filter(
+        AudioProcessingJob.job_id == job_id
+    ).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if current_user:
+        if job.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+    else:
+        guest_id = request.headers.get("X-Guest-ID") if request else None
+        if not guest_id or job.guest_id != guest_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+    job.project_name = body.project_name
+    db.commit()
+    db.refresh(job)
+    return job
+
+
+@router.delete("/projects/{job_id}", response_model=MessageResponse)
+async def delete_project(
+    job_id: str,
+    request: Request,
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    db: Session = Depends(get_db),
+):
+    """Delete a project and its files. User/guest must own the job."""
+    job = db.query(AudioProcessingJob).filter(
+        AudioProcessingJob.job_id == job_id
+    ).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if current_user:
+        if job.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+    else:
+        guest_id = request.headers.get("X-Guest-ID") if request else None
+        if not guest_id or job.guest_id != guest_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+    # Delete physical files
+    if job.input_file_path and os.path.exists(job.input_file_path):
+        os.remove(job.input_file_path)
+    if job.output_file_path and os.path.exists(job.output_file_path):
+        os.remove(job.output_file_path)
+
+    db.delete(job)
+    db.commit()
+
+    return {"message": f"Project {job_id} deleted"}
 
 
 @router.get("/status/{job_id}", response_model=AudioJobStatusResponse)
