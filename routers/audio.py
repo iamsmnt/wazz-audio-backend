@@ -430,6 +430,46 @@ async def stream_job_status(
     return EventSourceResponse(event_generator())
 
 
+@router.get("/original/{job_id}")
+async def download_original_audio(
+    job_id: str,
+    request: Request = None,
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Download original (input) audio file for a completed job.
+    Authorization check: user/guest must own the job.
+    """
+    job = db.query(AudioProcessingJob).filter(
+        AudioProcessingJob.job_id == job_id
+    ).first()
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if current_user:
+        if job.user_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this job")
+    else:
+        guest_id = request.headers.get("X-Guest-ID") if request else None
+        if not guest_id or job.guest_id != guest_id:
+            raise HTTPException(status_code=403, detail="Not authorized to access this job")
+
+    if not job.input_file_path or not os.path.exists(job.input_file_path):
+        raise HTTPException(status_code=404, detail="Original file not found on server")
+
+    content_type, _ = mimetypes.guess_type(job.input_file_path)
+    if content_type is None:
+        content_type = "audio/wav"
+
+    return FileResponse(
+        path=job.input_file_path,
+        media_type=content_type,
+        filename=job.original_filename or os.path.basename(job.input_file_path),
+    )
+
+
 @router.get("/download/{job_id}")
 async def download_processed_audio(
     job_id: str,
