@@ -527,9 +527,13 @@ async def download_processed_audio(
         guest_id=job.guest_id
     )
 
-    # Generate download filename: {original_name}_updated.{extension}
-    filename_without_ext, file_ext = os.path.splitext(job.original_filename)
-    download_filename = f"{filename_without_ext}_updated{file_ext}"
+    # Generate download filename based on output type
+    filename_without_ext, _ = os.path.splitext(job.original_filename)
+    output_ext = os.path.splitext(job.output_file_path)[1]  # .wav or .zip
+    if output_ext == ".zip":
+        download_filename = f"{filename_without_ext}_separated.zip"
+    else:
+        download_filename = f"{filename_without_ext}_updated{output_ext}"
 
     # Return file response with streaming
     return FileResponse(
