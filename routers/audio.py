@@ -2,19 +2,23 @@
 
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, status, Request, Query
 from fastapi.responses import FileResponse
+from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
 from typing import Optional, List
 from datetime import datetime, timedelta, timezone
+import asyncio
+import json
 import os
 import uuid
 import shutil
 import mimetypes
 
-from wazz_shared.database import get_db
-from wazz_shared.models import AudioProcessingJob, User
+from wazz_shared.database import get_db, SessionLocal
+from wazz_shared.models import AudioProcessingJob, User, TokenBlacklist
 from wazz_shared.schemas import AudioUploadResponse, AudioJobStatusResponse, ProjectResponse, ProjectRenameRequest, MessageResponse
 from dependencies import get_optional_current_user
+from auth import verify_token
 from wazz_shared.config import get_shared_settings
 from wazz_shared.usage_tracking import track_file_upload, track_file_download
 from celery_init import celery_app
@@ -313,6 +317,117 @@ async def get_job_status(
         completed_at=job.completed_at,
         output_available=(job.status == "completed" and job.output_file_path is not None)
     )
+
+
+@router.get("/stream/{job_id}")
+async def stream_job_status(
+    job_id: str,
+    request: Request,
+    token: Optional[str] = Query(None),
+    guest_id: Optional[str] = Query(None),
+):
+    """
+    Stream job status updates via Server-Sent Events.
+
+    Uses query params for auth since EventSource API cannot set headers.
+    Pass either ?token=<bearer_token> or ?guest_id=<guest_id>.
+    """
+    # Authenticate via query params (EventSource can't send headers)
+    user_id = None
+    authenticated_guest_id = None
+
+    if token:
+        blacklisted = None
+        db = SessionLocal()
+        try:
+            blacklisted = db.query(TokenBlacklist).filter(TokenBlacklist.token == token).first()
+        finally:
+            db.close()
+
+        if blacklisted:
+            raise HTTPException(status_code=401, detail="Token revoked")
+
+        payload = verify_token(token)
+        if payload and payload.get("type") == "access":
+            user_id_str = payload.get("sub")
+            if user_id_str:
+                try:
+                    user_id = int(user_id_str)
+                except (ValueError, TypeError):
+                    raise HTTPException(status_code=401, detail="Invalid token")
+            else:
+                raise HTTPException(status_code=401, detail="Invalid token")
+        else:
+            raise HTTPException(status_code=401, detail="Invalid token")
+    elif guest_id:
+        authenticated_guest_id = guest_id
+    else:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    # Verify job exists and user owns it
+    db = SessionLocal()
+    try:
+        job = db.query(AudioProcessingJob).filter(
+            AudioProcessingJob.job_id == job_id
+        ).first()
+
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+
+        if user_id and job.user_id != user_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+        if authenticated_guest_id and job.guest_id != authenticated_guest_id:
+            raise HTTPException(status_code=403, detail="Not authorized")
+    finally:
+        db.close()
+
+    async def event_generator():
+        last_progress = None
+        last_status = None
+
+        while True:
+            if await request.is_disconnected():
+                break
+
+            db = SessionLocal()
+            try:
+                job = db.query(AudioProcessingJob).filter(
+                    AudioProcessingJob.job_id == job_id
+                ).first()
+
+                if not job:
+                    yield {"event": "error", "data": json.dumps({"error": "Job not found"})}
+                    break
+
+                current_status = job.status
+                current_progress = job.progress
+
+                # Only send event when something changed
+                if current_status != last_status or current_progress != last_progress:
+                    last_status = current_status
+                    last_progress = current_progress
+
+                    data = {
+                        "job_id": job.job_id,
+                        "status": job.status,
+                        "progress": job.progress,
+                        "error_message": job.error_message,
+                        "output_available": (
+                            job.status == "completed"
+                            and job.output_file_path is not None
+                        ),
+                    }
+                    yield {"event": "status", "data": json.dumps(data)}
+
+                    # Terminal states — close the stream
+                    if current_status in ("completed", "failed"):
+                        break
+            finally:
+                db.close()
+
+            await asyncio.sleep(2)
+
+    return EventSourceResponse(event_generator())
 
 
 @router.get("/download/{job_id}")
