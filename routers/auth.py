@@ -1,8 +1,14 @@
-"""Authentication routes for signup, login, logout"""
+"""Authentication routes for signup, login, logout, email verification, password reset"""
+
+import logging
+import secrets
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
-from datetime import timedelta
+
+from wazz_shared.config import get_shared_settings
 from wazz_shared.database import get_db
 from wazz_shared.models import User, TokenBlacklist
 from wazz_shared.schemas import (
@@ -12,6 +18,15 @@ from wazz_shared.schemas import (
     Token,
     RefreshTokenRequest,
     MessageResponse,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+    VerifyEmailRequest,
+    ResendVerificationRequest,
+)
+from wazz_shared.events import (
+    UserRegisteredEvent,
+    UserVerifiedEvent,
+    UserPasswordResetRequestedEvent,
 )
 from auth import (
     get_password_hash,
@@ -22,10 +37,29 @@ from auth import (
     get_token_expiration,
 )
 from dependencies import get_current_user, security
-from wazz_shared.config import get_shared_settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 settings = get_shared_settings()
+
+# Event publisher — set from main.py at startup
+_event_publisher = None
+
+
+def set_event_publisher(publisher):
+    """Wire the EventPublisher instance into this module."""
+    global _event_publisher
+    _event_publisher = publisher
+
+
+def _publish_event(event):
+    """Fire-and-forget event publishing. Never raises."""
+    if _event_publisher:
+        try:
+            _event_publisher.publish(event)
+        except Exception as e:
+            logger.error(f"Failed to publish {event.event_type}: {e}")
 
 
 @router.post("/signup", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -46,15 +80,33 @@ def signup(user_data: UserCreate, db: Session = Depends(get_db)):
             status_code=status.HTTP_400_BAD_REQUEST, detail="Username already taken"
         )
 
-    # Create new user
+    # Create new user with verification token
     hashed_password = get_password_hash(user_data.password)
+    verification_token = secrets.token_urlsafe(32)
+    verification_expires = datetime.utcnow() + timedelta(hours=24)
+
     new_user = User(
-        email=user_data.email, username=user_data.username, hashed_password=hashed_password
+        email=user_data.email,
+        username=user_data.username,
+        hashed_password=hashed_password,
+        verification_token=verification_token,
+        verification_token_expires=verification_expires,
     )
 
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
+
+    # Publish event — signup succeeds even if publish fails
+    _publish_event(UserRegisteredEvent(
+        timestamp=datetime.utcnow(),
+        user_id=new_user.id,
+        email=new_user.email,
+        username=new_user.username,
+        verification_token=verification_token,
+        verification_token_expires=verification_expires,
+        frontend_url=settings.frontend_url,
+    ))
 
     return new_user
 
@@ -195,6 +247,109 @@ def refresh_access_token(refresh_data: RefreshTokenRequest, db: Session = Depend
         "refresh_token": new_refresh_token,
         "token_type": "bearer",
     }
+
+
+@router.post("/verify-email", response_model=MessageResponse)
+def verify_email(data: VerifyEmailRequest, db: Session = Depends(get_db)):
+    """Verify user email with token"""
+
+    user = db.query(User).filter(User.verification_token == data.token).first()
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid verification token")
+
+    if user.verification_token_expires and user.verification_token_expires.replace(tzinfo=None) < datetime.utcnow():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Verification token has expired")
+
+    user.is_verified = True
+    user.verification_token = None
+    user.verification_token_expires = None
+    db.commit()
+
+    # Publish event — triggers welcome email
+    _publish_event(UserVerifiedEvent(
+        timestamp=datetime.utcnow(),
+        user_id=user.id,
+        email=user.email,
+        username=user.username,
+        frontend_url=settings.frontend_url,
+    ))
+
+    return {"message": "Email verified successfully"}
+
+
+@router.post("/forgot-password", response_model=MessageResponse)
+def forgot_password(data: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Request a password reset email. Always returns success to prevent email enumeration."""
+
+    user = db.query(User).filter(User.email == data.email).first()
+
+    if user and user.is_active:
+        reset_token = secrets.token_urlsafe(32)
+        reset_expires = datetime.utcnow() + timedelta(
+            hours=settings.password_reset_token_expire_hours
+        )
+        user.password_reset_token = reset_token
+        user.password_reset_token_expires = reset_expires
+        db.commit()
+
+        _publish_event(UserPasswordResetRequestedEvent(
+            timestamp=datetime.utcnow(),
+            user_id=user.id,
+            email=user.email,
+            username=user.username,
+            reset_token=reset_token,
+            reset_token_expires=reset_expires,
+            frontend_url=settings.frontend_url,
+        ))
+
+    return {"message": "If an account with that email exists, a password reset link has been sent"}
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+def reset_password(data: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Reset password using the reset token"""
+
+    user = db.query(User).filter(User.password_reset_token == data.token).first()
+
+    if not user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid reset token")
+
+    if user.password_reset_token_expires and user.password_reset_token_expires.replace(tzinfo=None) < datetime.utcnow():
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Reset token has expired")
+
+    user.hashed_password = get_password_hash(data.new_password)
+    user.password_reset_token = None
+    user.password_reset_token_expires = None
+    db.commit()
+
+    return {"message": "Password has been reset successfully"}
+
+
+@router.post("/resend-verification", response_model=MessageResponse)
+def resend_verification(data: ResendVerificationRequest, db: Session = Depends(get_db)):
+    """Resend the verification email. Always returns success to prevent enumeration."""
+
+    user = db.query(User).filter(User.email == data.email).first()
+
+    if user and not user.is_verified and user.is_active:
+        verification_token = secrets.token_urlsafe(32)
+        verification_expires = datetime.utcnow() + timedelta(hours=24)
+        user.verification_token = verification_token
+        user.verification_token_expires = verification_expires
+        db.commit()
+
+        _publish_event(UserRegisteredEvent(
+            timestamp=datetime.utcnow(),
+            user_id=user.id,
+            email=user.email,
+            username=user.username,
+            verification_token=verification_token,
+            verification_token_expires=verification_expires,
+            frontend_url=settings.frontend_url,
+        ))
+
+    return {"message": "If your account requires verification, a new email has been sent"}
 
 
 @router.get("/me", response_model=UserResponse)

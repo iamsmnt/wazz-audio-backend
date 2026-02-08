@@ -1,5 +1,6 @@
 """Main FastAPI application"""
 
+import logging
 import warnings
 # Suppress bcrypt version warning (known passlib 1.7.4 + bcrypt 4.x compatibility issue)
 warnings.filterwarnings("ignore", message=".*error reading bcrypt version.*")
@@ -8,13 +9,25 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from wazz_shared.config import get_shared_settings
 from wazz_shared.database import engine, Base
+from wazz_shared.events import EventPublisher
 from celery_init import celery_app
 from routers import auth, guest, audio, usage_stats, admin, user_settings
+from routers.auth import set_event_publisher
 
+logger = logging.getLogger(__name__)
 settings = get_shared_settings()
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
+
+# Initialize EventPublisher for domain events
+event_publisher = EventPublisher(settings.rabbitmq_url)
+try:
+    event_publisher.connect()
+except Exception as e:
+    logger.warning(f"Could not connect EventPublisher at startup: {e}")
+
+set_event_publisher(event_publisher)
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -40,6 +53,12 @@ app.include_router(audio.router)
 app.include_router(usage_stats.router)
 app.include_router(admin.router)
 app.include_router(user_settings.router)
+
+
+@app.on_event("shutdown")
+def shutdown_event():
+    """Clean up EventPublisher connection."""
+    event_publisher.close()
 
 
 @app.get("/")

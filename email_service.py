@@ -1,4 +1,8 @@
-"""Email service for sending verification emails"""
+"""
+DEPRECATED: This module is superseded by the decoupled email service (wazz-audio-email/).
+The backend now publishes domain events to RabbitMQ, and the email service
+consumes them asynchronously. This file is retained temporarily for reference.
+"""
 
 import smtplib
 from email.mime.text import MIMEText

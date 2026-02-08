@@ -1,9 +1,10 @@
 # Workspace-level docker-compose
-# Place this file in the workspace root alongside wazz-audio-backend/ and wazz-audio-shared/
+# Place this file in the workspace root alongside all service directories
 #
 # workspace/
 # ├── wazz-audio-shared/
 # ├── wazz-audio-backend/
+# ├── wazz-audio-email/
 # └── docker-compose.yml    <-- copy this file here
 #
 # Usage: docker compose up --build
@@ -51,8 +52,22 @@ services:
         condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://postgres:postgres@db:5432/whazz_audio
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
       - CELERY_BROKER_URL=amqp://guest:guest@rabbitmq:5672//
       - CELERY_RESULT_BACKEND=db+postgresql://postgres:postgres@db:5432/whazz_audio
+
+  email-service:
+    build:
+      context: wazz-audio-email
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - wazz-audio-email/.env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672//
 
 volumes:
   postgres_data:
